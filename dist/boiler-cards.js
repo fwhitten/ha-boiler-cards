@@ -4,7 +4,7 @@
  * MIT licence
  */
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const REPO_URL = 'https://github.com/fwhitten/ha-boiler-cards';
 
 /* ------------------------------------------------------------------ */
@@ -93,12 +93,22 @@ function zoneIcon(zone) {
   return /ufh|floor/i.test(zone.name || '') ? 'underfloor' : 'radiator';
 }
 
+/* Thermostats that report hvac_action are trusted. Those that don't count as
+   heating while in a heating mode and below their target. */
+function climateHeating(state, attrs) {
+  const action = attrs && attrs.hvac_action;
+  if (action != null) return action === 'heating' || action === 'preheating';
+  const current = parseFloat(attrs && attrs.current_temperature);
+  const target = parseFloat(attrs && attrs.temperature);
+  return ['heat', 'auto', 'heat_cool'].includes(state) && Number.isFinite(current) && Number.isFinite(target) && current < target;
+}
+
 function zoneModel(hass, zone) {
   const climate = stateObj(hass, zone.climate_entity);
   const call = stateObj(hass, zone.heat_call_entity);
   let heating = false;
   if (call) heating = ON_STATES.has(String(call.state).toLowerCase());
-  else if (climate) heating = climate.attributes && climate.attributes.hvac_action === 'heating';
+  else if (climate) heating = climateHeating(climate.state, climate.attributes);
   const humidity = zone.humidity_entity ? numState(hass, zone.humidity_entity) : numAttr(climate, 'current_humidity');
   return {
     name: zone.name || (climate && climate.attributes.friendly_name) || zone.climate_entity || 'Zone',
@@ -304,22 +314,8 @@ ha-card { padding: 20px 22px 22px; }
     };
   }
 
-  static getConfigForm() {
-    return {
-      schema: [
-        { name: 'title', selector: { text: {} } },
-        { name: 'flow_temp_entity', selector: { entity: { domain: 'sensor' } } },
-        { name: 'flow_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number'] } } },
-        { name: 'return_temp_entity', selector: { entity: { domain: 'sensor' } } },
-        { name: 'dhw_temp_entity', selector: { entity: { domain: 'sensor' } } },
-        { name: 'dhw_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number', 'water_heater'] } } },
-        { name: 'flame_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
-        { name: 'pump_entity', selector: { entity: { domain: ['binary_sensor', 'sensor', 'select'] } } },
-        { name: 'dhw_active_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
-      ],
-      computeLabel: (s) => FORM_LABELS[s.name],
-      computeHelper: (s) => FORM_HELPERS[s.name],
-    };
+  static getConfigElement() {
+    return document.createElement('boiler-flow-card-editor');
   }
 
   getCardSize() {
@@ -587,20 +583,8 @@ ha-card { padding: 20px 22px 18px; }
     };
   }
 
-  static getConfigForm() {
-    return {
-      schema: [
-        { name: 'title', selector: { text: {} } },
-        { name: 'flow_temp_entity', selector: { entity: { domain: 'sensor' } } },
-        { name: 'flow_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number'] } } },
-        { name: 'return_temp_entity', selector: { entity: { domain: 'sensor' } } },
-        { name: 'flame_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
-        { name: 'dhw_active_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
-        { name: 'default_hours', selector: { select: { mode: 'dropdown', options: ['6', '12', '24', '48'] } } },
-      ],
-      computeLabel: (s) => FORM_LABELS[s.name],
-      computeHelper: (s) => FORM_HELPERS[s.name],
-    };
+  static getConfigElement() {
+    return document.createElement('boiler-history-card-editor');
   }
 
   constructor() {
@@ -687,7 +671,7 @@ ha-card { padding: 20px 22px 18px; }
       const binary = (id) => id ? spansFrom(get(id), (e) => ON_STATES.has(String(e.s).toLowerCase()), end) : null;
       const zoneSpans = zones.map((z) => z.heat_call_entity
         ? binary(z.heat_call_entity)
-        : spansFrom(get(z.climate_entity), (e) => e.a && e.a.hvac_action === 'heating', end));
+        : spansFrom(get(z.climate_entity), (e) => !!e.a && climateHeating(e.s, e.a), end));
       this._data = {
         start,
         end,
@@ -1064,13 +1048,148 @@ const FORM_LABELS = {
   heating_entity: 'Heating energy',
   hot_water_entity: 'Hot water energy',
   mode: 'How to work out today’s energy',
+  name: 'Name',
+  climate_entity: 'Thermostat',
+  heat_call_entity: 'Calling for heat (optional)',
+  humidity_entity: 'Humidity (optional)',
+  icon: 'Icon',
 };
 
 const FORM_HELPERS = {
-  dhw_active_entity: 'If left empty, hot water is assumed when the flame is on and no zone is calling. Add heating zones in the YAML editor.',
-  default_hours: 'Heating zones are set in the YAML editor.',
+  dhw_active_entity: 'If left empty, hot water is assumed when the flame is on and no zone is calling.',
   mode: 'Auto uses long-term statistics for ever-increasing meters and the raw value for sensors that reset daily.',
+  heat_call_entity: 'An entity that is on while this zone calls for heat. If empty, the thermostat’s own heating state is used.',
+  humidity_entity: 'If empty, the thermostat’s humidity reading is used when it has one.',
 };
+
+const FLOW_SCHEMA = [
+  { name: 'title', selector: { text: {} } },
+  { name: 'flow_temp_entity', selector: { entity: { domain: 'sensor' } } },
+  { name: 'flow_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number'] } } },
+  { name: 'return_temp_entity', selector: { entity: { domain: 'sensor' } } },
+  { name: 'dhw_temp_entity', selector: { entity: { domain: 'sensor' } } },
+  { name: 'dhw_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number', 'water_heater'] } } },
+  { name: 'flame_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
+  { name: 'pump_entity', selector: { entity: { domain: ['binary_sensor', 'sensor', 'select'] } } },
+  { name: 'dhw_active_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
+];
+
+const HISTORY_SCHEMA = [
+  { name: 'title', selector: { text: {} } },
+  { name: 'flow_temp_entity', selector: { entity: { domain: 'sensor' } } },
+  { name: 'flow_target_entity', selector: { entity: { domain: ['sensor', 'number', 'input_number'] } } },
+  { name: 'return_temp_entity', selector: { entity: { domain: 'sensor' } } },
+  { name: 'flame_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
+  { name: 'dhw_active_entity', selector: { entity: { domain: ['binary_sensor', 'sensor'] } } },
+  { name: 'default_hours', selector: { select: { mode: 'dropdown', options: ['6', '12', '24', '48'] } } },
+];
+
+const ZONE_SCHEMA = [
+  { name: 'name', selector: { text: {} } },
+  { name: 'climate_entity', selector: { entity: { domain: 'climate' } } },
+  { name: 'heat_call_entity', selector: { entity: { domain: ['binary_sensor', 'switch', 'input_boolean', 'sensor'] } } },
+  { name: 'humidity_entity', selector: { entity: { domain: 'sensor', device_class: 'humidity' } } },
+  { name: 'icon', selector: { select: { mode: 'dropdown', options: [
+    { value: 'radiator', label: 'Radiator' },
+    { value: 'underfloor', label: 'Underfloor heating' },
+  ] } } },
+];
+
+/* ha-form is lazy-loaded by Home Assistant; opening a built-in card editor loads it. */
+async function loadHaForm() {
+  if (customElements.get('ha-form')) return;
+  try {
+    const helpers = await window.loadCardHelpers();
+    const card = await helpers.createCardElement({ type: 'entities', entities: [] });
+    await card.constructor.getConfigElement();
+  } catch (err) {
+    // Fall through and wait; ha-form may still arrive.
+  }
+  await Promise.race([customElements.whenDefined('ha-form'), new Promise((r) => setTimeout(r, 5000))]);
+}
+
+/* Shows the card's zones list as one collapsible section per zone, plus an
+   empty one for adding a zone. Clearing every field of a zone removes it. */
+class BoilerZonesEditor extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...config };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  async _render() {
+    if (!this._hass || !this._config) return;
+    if (!this._form) {
+      if (!this._formReady) {
+        this._formReady = loadHaForm().then(() => {
+          this._form = document.createElement('ha-form');
+          this._form.computeLabel = (s) => FORM_LABELS[s.name] ?? s.name;
+          this._form.computeHelper = (s) => FORM_HELPERS[s.name];
+          this._form.addEventListener('value-changed', (ev) => this._changed(ev.detail.value));
+          this.appendChild(this._form);
+        });
+      }
+      await this._formReady;
+    }
+    const zones = Array.isArray(this._config.zones) ? this._config.zones : [];
+    const data = { ...this._config };
+    delete data.zones;
+    const zoneSections = [...zones, null].map((z, i) => {
+      data[`zone${i + 1}`] = z ? { ...z } : {};
+      return {
+        type: 'expandable',
+        name: `zone${i + 1}`,
+        title: z ? (z.name || z.climate_entity || `Zone ${i + 1}`) : 'Add a heating zone',
+        schema: ZONE_SCHEMA,
+      };
+    });
+    this._form.hass = this._hass;
+    this._form.data = data;
+    this._form.schema = [...this.constructor.schema, ...zoneSections];
+  }
+
+  _changed(value) {
+    const config = {};
+    const zones = [];
+    Object.keys(value)
+      .filter((k) => /^zone\d+$/.test(k))
+      .sort((a, b) => parseInt(a.slice(4), 10) - parseInt(b.slice(4), 10))
+      .forEach((k) => {
+        const zone = {};
+        Object.entries(value[k] || {}).forEach(([key, v]) => {
+          if (v !== '' && v != null) zone[key] = v;
+        });
+        if (zone.name || zone.climate_entity || zone.heat_call_entity || zone.humidity_entity) zones.push(zone);
+      });
+    Object.entries(value).forEach(([k, v]) => {
+      if (/^zone\d+$/.test(k)) return;
+      if (k === 'type' || (v !== '' && v != null)) config[k] = v;
+    });
+    if (zones.length) config.zones = zones;
+    this._config = config;
+    this.dispatchEvent(new CustomEvent('config-changed', { detail: { config }, bubbles: true, composed: true }));
+    this._render();
+  }
+}
+
+class BoilerFlowCardEditor extends BoilerZonesEditor {
+  static get schema() {
+    return FLOW_SCHEMA;
+  }
+}
+
+class BoilerHistoryCardEditor extends BoilerZonesEditor {
+  static get schema() {
+    return HISTORY_SCHEMA;
+  }
+}
+
+if (!customElements.get('boiler-flow-card-editor')) customElements.define('boiler-flow-card-editor', BoilerFlowCardEditor);
+if (!customElements.get('boiler-history-card-editor')) customElements.define('boiler-history-card-editor', BoilerHistoryCardEditor);
 
 const CARDS = [
   ['boiler-flow-card', BoilerFlowCard, 'Boiler live flow', 'Boiler with flame, pump, flow/return/hot water pipes and heating zones.'],

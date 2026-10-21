@@ -31,11 +31,13 @@ Tapping any value opens Home Assistant's more-info dialog for that entity.
 
 ## Configuration
 
-All four cards appear in the card picker. The main entities can be set in the visual editor; heating zones are set in the YAML editor.
+All four cards appear in the card picker, and everything can be set in the visual editor.
+
+When you first add the flow or history card, it guesses its heating zones from the first two thermostats it finds. Check them under each zone section in the editor. Use **Add a heating zone** to add another, and clear all of a zone's fields to remove it.
 
 ### Heating zones
 
-The flow card and the history card share the same `zones` list, so you can paste it into both.
+The flow card and the history card share the same `zones` list. In YAML you can paste it into both.
 
 ```yaml
 zones:
@@ -49,7 +51,13 @@ zones:
     icon: underfloor
 ```
 
-A zone counts as **Heating** when `heat_call_entity` is on. Without one, the card uses the thermostat's `hvac_action` (`heating`). Humidity comes from `humidity_entity`, or the thermostat's `current_humidity` attribute.
+A zone shows **Heating** when:
+
+1. its `heat_call_entity` is on, if you set one (most reliable); otherwise
+2. the thermostat reports `hvac_action: heating` (or `preheating`); otherwise, for thermostats that don't report `hvac_action`,
+3. the thermostat is in a heating mode and its current temperature is below its target.
+
+If a tile says Idle while the zone is calling, set `heat_call_entity` to the entity that shows the call for heat. Humidity comes from `humidity_entity`, or the thermostat's `current_humidity` attribute.
 
 ### Live flow card
 
