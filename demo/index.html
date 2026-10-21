@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boiler Cards demo</title>
+<style>
+  body { margin: 0; padding: 24px 16px 48px; background: #0F1114; color: #EEF1F4; font-family: Inter, system-ui, sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { margin: 0 0 16px; color: #A3ABB5; font-size: 14px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
+  .bar button { font: inherit; font-size: 13px; color: #EEF1F4; background: #1F242B; border: 1px solid #2A3038; border-radius: 10px; padding: 8px 12px; cursor: pointer; }
+  .bar button[aria-pressed="true"] { background: #2E343D; border-color: #FF8A3D; }
+  .cols { display: flex; flex-wrap: wrap; gap: 32px; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .col h2 { font-size: 13px; font-weight: 600; color: #A3ABB5; margin: 0; }
+  .wide { width: min(600px, 100%); }
+  .phone { width: min(380px, 100%); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+</style>
+</head>
+<body>
+<h1>Boiler Cards demo</h1>
+<p>Mock Home Assistant data. Pick a state to see how the cards react.</p>
+<div class="bar" id="scenarios"></div>
+<div class="cols">
+  <div class="col wide"><h2>Dashboard column · 600px</h2><div id="wide" class="col"></div></div>
+  <div class="col phone"><h2>Phone · 380px</h2><div id="phone" class="col"></div></div>
+</div>
+
+<script type="module">
+import '../dist/boiler-cards.js';
+
+const NOW = Date.now();
+const iso = (t) => new Date(t).toISOString();
+
+const SCENARIOS = {
+  'Heating: radiators': { mode: 'heat', flame: true, pump: 'on', rad: true, ufh: false, flow: 58, flowT: 60, ret: 44, dhw: 38 },
+  'Heating: both zones': { mode: 'heat', flame: true, pump: 'on', rad: true, ufh: true, flow: 61, flowT: 62, ret: 45, dhw: 37 },
+  'Heating: flame cycling off': { mode: 'heat', flame: false, pump: 'on', rad: true, ufh: false, flow: 55, flowT: 60, ret: 47, dhw: 37 },
+  'Hot water': { mode: 'dhw', flame: true, pump: 'on', rad: true, ufh: false, flow: 66, flowT: 60, ret: 53, dhw: 49 },
+  'Pump overrun': { mode: 'over', flame: false, pump: 'overrun', rad: false, ufh: false, flow: 52, flowT: 0, ret: 47, dhw: 31 },
+  'Idle': { mode: 'idle', flame: false, pump: 'off', rad: false, ufh: false, flow: 31, flowT: 0, ret: 29, dhw: 24 },
+};
+
+const st = (state, attributes = {}, agoMin = 0) => ({
+  state: String(state), attributes,
+  last_changed: iso(NOW - agoMin * 60000), last_updated: iso(NOW - agoMin * 60000),
+});
+
+function buildStates(s) {
+  const temp = { unit_of_measurement: '°C', state_class: 'measurement' };
+  const energy = { unit_of_measurement: 'kWh', state_class: 'total_increasing' };
+  return {
+    'sensor.boiler_flow_temperature': st(s.flow, temp),
+    'sensor.boiler_flow_target': st(s.flowT, temp),
+    'sensor.boiler_return_temperature': st(s.ret, temp),
+    'sensor.boiler_dhw_temperature': st(s.dhw, temp),
+    'sensor.boiler_dhw_target': st(50, temp),
+    'binary_sensor.boiler_flame': st(s.flame ? 'on' : 'off'),
+    'sensor.boiler_pump': st(s.pump),
+    'binary_sensor.boiler_dhw_active': st(s.mode === 'dhw' ? 'on' : 'off'),
+    'climate.radiators': st('heat', { friendly_name: 'Radiators', current_temperature: s.rad ? 20.4 : 21.2, temperature: 21, hvac_action: s.rad ? 'heating' : 'idle', current_humidity: 48 }),
+    'binary_sensor.radiators_heat_call': st(s.rad ? 'on' : 'off', {}, s.rad ? 82 : 330),
+    'climate.bedroom_ufh': st('heat', { friendly_name: 'Bedroom UFH', current_temperature: s.ufh ? 19.1 : 19.7, temperature: 19.5, hvac_action: s.ufh ? 'heating' : 'idle', current_humidity: 54 }),
+    'sensor.outdoor_temperature': st(6.4, temp),
+    'sensor.indoor_temperature': st(20.6, temp),
+    'sensor.boiler_heating_energy': st(1234.5, energy),
+    'sensor.boiler_hot_water_energy': st(321.0, energy),
+  };
+}
+
+// Synthetic history: heating schedule, flame cycling and a few hot water draws.
+function hourOf(t) { const d = new Date(t); return d.getHours() + d.getMinutes() / 60; }
+const inAny = (h, spans) => spans.some(([a, b]) => h >= a && h < b);
+const RAD = [[6, 9], [16.5, 22.5]];
+const UFH = [[5, 8], [17, 21]];
+const DHW = [[7.15, 7.3], [7.6, 7.75], [12.6, 12.75], [18.3, 18.45], [21.6, 21.75]];
+
+function sample(t, s) {
+  const recent = NOW - t < 80 * 60000;
+  const h = hourOf(t);
+  const rad = recent ? s.rad : inAny(h, RAD);
+  const ufh = recent ? s.ufh : inAny(h, UFH);
+  const dhw = recent && NOW - t < 5 * 60000 ? s.mode === 'dhw' : inAny(h, DHW);
+  const heat = rad || ufh;
+  const cyclingOff = heat && Math.floor(t / 600000) % 6 === 5;
+  const flame = dhw || (heat && !cyclingOff && !(recent && !s.flame));
+  const wobble = Math.sin(t / 900000) * 1.5;
+  const flow = dhw ? 64 : heat ? 59 + wobble : 31 + wobble / 2;
+  const ret = dhw ? 50 : heat ? flow - 14 : flow - 2;
+  return { rad, ufh, dhw, flame, flow: Math.round(flow), ret: Math.round(ret), target: heat ? 60 : 0 };
+}
+
+function history(msg, s) {
+  const start = Date.parse(msg.start_time);
+  const end = Date.parse(msg.end_time);
+  const series = {};
+  const push = (id, value, t, attrs) => {
+    const list = (series[id] = series[id] || []);
+    const last = list[list.length - 1];
+    const key = attrs ? JSON.stringify(attrs) : value;
+    if (last && last._k === key) return;
+    list.push({ s: String(value), lu: t / 1000, ...(attrs ? { a: attrs } : {}), _k: key });
+  };
+  for (let t = start; t <= end; t += 5 * 60000) {
+    const v = sample(t, s);
+    push('sensor.boiler_flow_temperature', v.flow, t);
+    push('sensor.boiler_return_temperature', v.ret, t);
+    push('sensor.boiler_flow_target', v.target, t);
+    push('binary_sensor.boiler_flame', v.flame ? 'on' : 'off', t);
+    push('binary_sensor.boiler_dhw_active', v.dhw ? 'on' : 'off', t);
+    push('binary_sensor.radiators_heat_call', v.rad ? 'on' : 'off', t);
+    push('climate.bedroom_ufh', 'heat', t, { hvac_action: v.ufh ? 'heating' : 'idle' });
+  }
+  const out = {};
+  msg.entity_ids.forEach((id) => { out[id] = (series[id] || []).map(({ _k, ...e }) => e); });
+  return out;
+}
+
+const ZONES = [
+  { name: 'Radiators', climate_entity: 'climate.radiators', heat_call_entity: 'binary_sensor.radiators_heat_call' },
+  { name: 'Bedroom UFH', climate_entity: 'climate.bedroom_ufh', icon: 'underfloor' },
+];
+
+const CONFIGS = {
+  flow: {
+    type: 'boiler-flow-card', title: 'Boiler',
+    flow_temp_entity: 'sensor.boiler_flow_temperature', flow_target_entity: 'sensor.boiler_flow_target',
+    return_temp_entity: 'sensor.boiler_return_temperature', dhw_temp_entity: 'sensor.boiler_dhw_temperature',
+    dhw_target_entity: 'sensor.boiler_dhw_target', flame_entity: 'binary_sensor.boiler_flame',
+    pump_entity: 'sensor.boiler_pump', dhw_active_entity: 'binary_sensor.boiler_dhw_active', zones: ZONES,
+  },
+  history: {
+    type: 'boiler-history-card',
+    flow_temp_entity: 'sensor.boiler_flow_temperature', flow_target_entity: 'sensor.boiler_flow_target',
+    return_temp_entity: 'sensor.boiler_return_temperature', flame_entity: 'binary_sensor.boiler_flame',
+    dhw_active_entity: 'binary_sensor.boiler_dhw_active', zones: ZONES,
+  },
+  climate: { type: 'boiler-climate-card', outdoor_entity: 'sensor.outdoor_temperature', indoor_entity: 'sensor.indoor_temperature' },
+  energy: { type: 'boiler-energy-card', heating_entity: 'sensor.boiler_heating_energy', hot_water_entity: 'sensor.boiler_hot_water_energy' },
+};
+
+const cards = [];
+function mount(parent, kind) {
+  const el = document.createElement(CONFIGS[kind].type);
+  el.setConfig(CONFIGS[kind]);
+  parent.appendChild(el);
+  cards.push(el);
+  return el;
+}
+const wide = document.getElementById('wide');
+const pair = document.createElement('div');
+pair.className = 'pair';
+wide.append(pair);
+mount(pair, 'climate');
+mount(pair, 'energy');
+mount(wide, 'flow');
+mount(wide, 'history');
+const phone = document.getElementById('phone');
+mount(phone, 'flow');
+mount(phone, 'history');
+
+let current = 'Heating: radiators';
+function apply() {
+  const s = SCENARIOS[current];
+  const hass = {
+    states: buildStates(s),
+    callWS: async (msg) => {
+      if (msg.type === 'history/history_during_period') return history(msg, s);
+      if (msg.type === 'recorder/statistic_during_period') return { change: msg.statistic_id.includes('heating') ? 18.6 : 3.2 };
+      throw new Error(`Unhandled ${msg.type}`);
+    },
+  };
+  cards.forEach((c) => {
+    if (c.localName === 'boiler-history-card') c.setConfig(CONFIGS.history);
+    c.hass = hass;
+  });
+  document.querySelectorAll('#scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === current)));
+}
+
+const bar = document.getElementById('scenarios');
+Object.keys(SCENARIOS).forEach((name) => {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = name;
+  b.addEventListener('click', () => { current = name; apply(); });
+  bar.append(b);
+});
+document.addEventListener('hass-more-info', (e) => console.log('more-info', e.detail.entityId));
+apply();
+</script>
+</body>
+</html>
