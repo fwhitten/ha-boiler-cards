@@ -4,7 +4,7 @@
  * MIT licence
  */
 
-const VERSION = '0.1.1';
+const VERSION = '0.1.2';
 const REPO_URL = 'https://github.com/fwhitten/ha-boiler-cards';
 
 /* ------------------------------------------------------------------ */
@@ -44,16 +44,74 @@ function numAttr(obj, key) {
   return Number.isFinite(v) ? v : null;
 }
 
+/* Number formatting follows the user's Home Assistant profile (language and
+   number format); BoilerBase updates this whenever hass changes. */
+let numberLocale;
+const NUMBER_FORMAT_LOCALES = { comma_decimal: 'en-US', decimal_comma: 'de', space_comma: 'fr', system: undefined };
+
+function setNumberLocale(hass) {
+  const locale = hass && hass.locale;
+  if (!locale) return;
+  numberLocale = locale.number_format in NUMBER_FORMAT_LOCALES ? NUMBER_FORMAT_LOCALES[locale.number_format] : locale.language;
+}
+
+function fmtNum(v, dp = 0) {
+  if (v == null || !Number.isFinite(v)) return '--';
+  try {
+    return v.toLocaleString(numberLocale, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  } catch (err) {
+    return v.toFixed(dp);
+  }
+}
+
 function deg(v, dp = 0) {
-  return v == null || !Number.isFinite(v) ? '--' : `${v.toFixed(dp)}°`;
+  return v == null || !Number.isFinite(v) ? '--' : `${fmtNum(v, dp)}°`;
 }
 
 function esc(v) {
   return String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 }
 
-function clock(t) {
-  return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+/* Formats a time the way the user set it in their Home Assistant profile. */
+function clock(t, hass) {
+  const locale = hass && hass.locale;
+  const format = locale && locale.time_format;
+  const options = { hour: '2-digit', minute: '2-digit' };
+  if (format === '12') options.hour12 = true;
+  if (format === '24') options.hour12 = false;
+  const language = format === 'system' || !locale ? undefined : locale.language;
+  try {
+    return new Date(t).toLocaleTimeString(language, options);
+  } catch (err) {
+    return new Date(t).toLocaleTimeString(undefined, options);
+  }
+}
+
+/* Brings `target`'s children in line with `source`'s, reusing nodes that are
+   already there. Keeping nodes (rather than replacing innerHTML) keeps the
+   card's height steady between updates, keeps focus, and lets CSS animations
+   run on instead of restarting on every sensor update. */
+function morph(target, source) {
+  const next = Array.from(source.childNodes);
+  next.forEach((node, i) => {
+    const current = target.childNodes[i];
+    if (!current) {
+      target.appendChild(node);
+    } else if (current.nodeType !== node.nodeType || current.nodeName !== node.nodeName) {
+      target.replaceChild(node, current);
+    } else if (current.nodeType === Node.ELEMENT_NODE) {
+      Array.from(current.attributes).forEach((a) => {
+        if (!node.hasAttribute(a.name)) current.removeAttribute(a.name);
+      });
+      Array.from(node.attributes).forEach((a) => {
+        if (current.getAttribute(a.name) !== a.value) current.setAttribute(a.name, a.value);
+      });
+      morph(current, node);
+    } else if (current.nodeValue !== node.nodeValue) {
+      current.nodeValue = node.nodeValue;
+    }
+  });
+  while (target.childNodes.length > next.length) target.removeChild(target.lastChild);
 }
 
 function signature(hass, ids) {
@@ -119,6 +177,7 @@ function zoneModel(hass, zone) {
     target: numAttr(climate, 'temperature'),
     humidity,
     since: call ? call.last_changed : null,
+    hasCall: !!zone.heat_call_entity,
   };
 }
 
@@ -146,6 +205,7 @@ const BASE_CSS = `
 }
 ha-card {
   display: block;
+  height: 100%;
   background: var(--bc-bg);
   color: var(--bc-text);
   border: none;
@@ -181,6 +241,7 @@ class BoilerBase extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    setNumberLocale(hass);
     this._update();
   }
 
@@ -197,10 +258,21 @@ class BoilerBase extends HTMLElement {
 
   _update(force = false) {
     if (!this._hass || !this._config) return;
-    const sig = this._signature();
+    const locale = this._hass.locale || {};
+    const sig = `${this._signature()}|${locale.language}/${locale.number_format}/${locale.time_format}`;
     if (!force && sig === this._sig) return;
     this._sig = sig;
-    this.shadowRoot.innerHTML = `<style>${BASE_CSS}${this.constructor.styles}</style>${this._render()}`;
+    if (!this._styled) {
+      const style = document.createElement('style');
+      style.textContent = BASE_CSS + this.constructor.styles;
+      this.shadowRoot.appendChild(style);
+      this._card = document.createElement('ha-card');
+      this.shadowRoot.appendChild(this._card);
+      this._styled = true;
+    }
+    const template = document.createElement('template');
+    template.innerHTML = this._render();
+    morph(this._card, template.content);
   }
 
   _tapAttrs(entityId, label) {
@@ -216,9 +288,10 @@ class BoilerFlowCard extends BoilerBase {
   static styles = `
 ha-card { padding: 20px 22px 22px; }
 .lf { container: lf / inline-size; }
-.head { margin-bottom: 16px; }
-.pill { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; font-weight: 600; }
-.pill-sub { font-weight: 500; opacity: 0.85; }
+.head { margin-bottom: 16px; flex-wrap: nowrap; }
+.head > :first-child { flex-shrink: 0; }
+.pill { display: inline-flex; align-items: center; gap: 10px; height: 40px; padding: 0 16px; border-radius: 20px; font-size: 14px; font-weight: 600; min-width: 0; white-space: nowrap; }
+.pill-sub { font-weight: 500; opacity: 0.85; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .m-heat { background: rgba(255,138,61,.14); color: var(--bc-heat-text); }
 .m-dhw { background: rgba(192,132,252,.14); color: var(--bc-dhw-text); }
 .m-over { background: rgba(76,141,240,.14); color: #9CC2FF; }
@@ -411,7 +484,7 @@ ha-card { padding: 20px 22px 22px; }
     const pumpText = { on: 'Running', overrun: 'Overrun', off: 'Off' }[m.pump];
     const spinCls = { on: 'sp', overrun: 'sp sp-slow', off: '' }[m.pump];
     const pillCls = { heat: 'm-heat', dhw: 'm-dhw', over: 'm-over', idle: 'm-idle' }[m.mode];
-    const subtitle = c.subtitle != null ? esc(c.subtitle) : m.updated ? `Updated ${clock(m.updated)}` : '';
+    const subtitle = c.subtitle != null ? esc(c.subtitle) : m.updated ? `Updated ${clock(m.updated, this._hass)}` : '';
     const hasDhw = !!c.dhw_temp_entity;
 
     const flameSvg = m.flame
@@ -426,15 +499,14 @@ ha-card { padding: 20px 22px 22px; }
           <span class="badge ${z.heating ? 'b-heat' : 'b-idle'}"><span class="dot"></span>${z.heating ? 'Heating' : 'Idle'}</span>
           ${z.humidity != null ? `<span class="hum num">${icon('droplet', 13, 2)}${Math.round(z.humidity)}%</span>` : ''}
         </div>
-        ${z.since ? `<span class="since">since ${clock(z.since)}</span>` : ''}
+        ${z.hasCall ? `<span class="since">${z.since ? `since ${clock(z.since, this._hass)}` : '&nbsp;'}</span>` : ''}
       </button>`).join('');
 
     return `
-<ha-card>
 <div class="lf">
   <div class="head">
     <div><div class="title">${esc(c.title ?? 'Boiler')}</div>${subtitle ? `<div class="sub">${subtitle}</div>` : ''}</div>
-    <div class="pill ${pillCls}"><span class="dot"></span><span>${m.modeLabel}</span><span class="pill-sub">· ${esc(m.modeSub)}</span></div>
+    <div class="pill ${pillCls}" title="${m.modeLabel} · ${esc(m.modeSub)}"><span class="dot"></span><span>${m.modeLabel}</span><span class="pill-sub">· ${esc(m.modeSub)}</span></div>
   </div>
   <div class="lf-body">
     <div class="lf-top">
@@ -471,8 +543,7 @@ ha-card { padding: 20px 22px 22px; }
     </div>
     ${zones ? `<div class="nzones">${zones}</div>` : ''}
   </div>
-</div>
-</ha-card>`;
+</div>`;
   }
 }
 
@@ -544,7 +615,7 @@ ha-card { padding: 20px 22px 18px; }
 .seg:focus-visible { outline: 2px solid var(--bc-heat-text); outline-offset: 1px; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 16px; }
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border-radius: 15px; background: var(--bc-tile); font-size: 13px; color: var(--bc-muted); white-space: nowrap; }
-.chip b { color: var(--bc-text); font-weight: 600; }
+.chip b { color: var(--bc-text); font-weight: 600; display: inline-block; min-width: 3ch; }
 .sw { width: 14px; height: 3px; border-radius: 2px; }
 .sw-dash { width: 14px; height: 0; border-top: 2px dashed #C9CED4; }
 .sw-box { width: 12px; height: 12px; border-radius: 3px; background: rgba(255,138,61,0.22); }
@@ -609,17 +680,24 @@ ha-card { padding: 20px 22px 18px; }
     this._fetchedAt = 0;
   }
 
+  /* Once a minute: move the time axis on, and re-fetch history when it is
+     stale. Nothing is fetched while the dashboard is in a background tab. */
   connectedCallback() {
     clearInterval(this._timer);
-    this._timer = setInterval(() => {
-      if (!this._config) return;
-      if (Date.now() - this._fetchedAt > (this._config.refresh_minutes || 5) * 60000) this._fetch();
-      else this._update(true);
-    }, 60000);
+    this._onVisible = () => this._tick();
+    document.addEventListener('visibilitychange', this._onVisible);
+    this._timer = setInterval(() => this._tick(), 60000);
   }
 
   disconnectedCallback() {
     clearInterval(this._timer);
+    document.removeEventListener('visibilitychange', this._onVisible);
+  }
+
+  _tick() {
+    if (!this._config || !this._hass || document.visibilityState !== 'visible') return;
+    if (Date.now() - this._fetchedAt > (this._config.refresh_minutes || 5) * 60000) this._fetch();
+    else this._update();
   }
 
   getCardSize() {
@@ -707,9 +785,14 @@ ha-card { padding: 20px 22px 18px; }
     const d = this._data;
 
     let plot = '';
-    let lanes = '';
     let ylabels = '';
     let dots = '';
+    let laneSpans = { zones: [], flame: null, dhw: null };
+    const rects = (spans, y0, y1) => (spans || []).map(([a, b]) => {
+      const x0 = X(a);
+      const x1 = Math.max(x0 + 3, X(b));
+      return `M${x0.toFixed(1)} ${y0}H${x1.toFixed(1)}V${y1}H${x0.toFixed(1)}Z`;
+    }).join(' ') || 'M0 0';
     if (d) {
       const withNow = (series, live) => {
         const s = series.slice();
@@ -748,11 +831,6 @@ ha-card { padding: 20px 22px 18px; }
         });
         return out || 'M0 0';
       };
-      const rects = (spans, y0, y1) => (spans || []).map(([a, b]) => {
-        const x0 = X(a);
-        const x1 = Math.max(x0 + 3, X(b));
-        return `M${x0.toFixed(1)} ${y0}H${x1.toFixed(1)}V${y1}H${x0.toFixed(1)}Z`;
-      }).join(' ') || 'M0 0';
       const targetSteps = () => {
         const windows = zones.length ? heat : [[d.start, now]];
         let out = '';
@@ -781,32 +859,35 @@ ha-card { padding: 20px 22px 18px; }
         </svg>`;
       const dot = (v, color) => v == null ? '' : `<div class="now-dot" style="top:${(Y(v) / 2).toFixed(1)}%;background:${color}"></div>`;
       dots = `<div class="now-line"></div>${dot(retNow, '#4C8DF0')}${dot(flowNow, '#FF8A3D')}`;
-
-      const laneRow = (name, spans, color) => `
-        <div class="hrow"><span class="lname">${esc(name)}</span>
-          <div class="lane"><svg viewBox="0 0 1000 18" preserveAspectRatio="none" aria-hidden="true"><path d="${rects(spans, 0, 18)}" fill="${color}"/></svg></div>
-        </div>`;
-      lanes = zones.map((z, i) => laneRow(z.name || z.climate_entity || `Zone ${i + 1}`, zoneSpans[i], '#FF8A3D')).join('')
-        + (flame ? laneRow('Flame', flame, '#F5C451') : '')
-        + (dhw ? laneRow('Hot water', dhw, '#C084FC') : '');
+      laneSpans = { zones: zoneSpans, flame, dhw };
     }
+
+    /* The timelines come from the config, not the data, so the card is the
+       same height while history is loading as after. */
+    const laneRow = (name, spans, color) => `
+      <div class="hrow"><span class="lname">${esc(name)}</span>
+        <div class="lane"><svg viewBox="0 0 1000 18" preserveAspectRatio="none" aria-hidden="true"><path d="${rects(spans, 0, 18)}" fill="${color}"/></svg></div>
+      </div>`;
+    const showDhw = !!c.dhw_active_entity || (!!c.flame_entity && zones.length > 0 && c.infer_hot_water !== false);
+    const lanes = zones.map((z, i) => laneRow(z.name || z.climate_entity || `Zone ${i + 1}`, laneSpans.zones[i], '#FF8A3D')).join('')
+      + (c.flame_entity ? laneRow('Flame', laneSpans.flame, '#F5C451') : '')
+      + (showDhw ? laneRow('Hot water', laneSpans.dhw, '#C084FC') : '');
 
     const msg = this._error ? esc(this._error) : !d ? 'Loading history…' : '';
     const ticks = [0, 1, 2, 3, 4].map((k) => {
       const t = winStart + (k * (now - winStart)) / 4;
       const cls = k === 0 ? ' first' : k === 4 ? ' last' : '';
-      return `<span class="xt${cls}" style="left:${k * 25}%">${k === 4 ? 'Now' : clock(t)}</span>`;
+      return `<span class="xt${cls}" style="left:${k * 25}%">${k === 4 ? 'Now' : clock(t, h)}</span>`;
     }).join('');
 
     return `
-<ha-card>
 <div class="hc">
   <div class="head">
     <div><div class="title">${esc(c.title ?? 'Heating history')}</div><div class="sub">Temperatures and demand</div></div>
     ${hours.length > 1 ? `<div class="segs" role="group" aria-label="Time range">${hours.map((r) => `<button class="seg${r === range ? ' on' : ''}" data-range="${r}" aria-pressed="${r === range}">${r}h</button>`).join('')}</div>` : ''}
   </div>
   <div class="chips">
-    <button class="tap chip num" ${this._tapAttrs(c.flow_temp_entity, 'Flow temperature')}><span class="sw" style="background:#FF8A3D"></span>Flow <b>${deg(flowNow)}</b>${tgtNow != null ? ` → ${deg(tgtNow)}` : ''}</button>
+    <button class="tap chip num" ${this._tapAttrs(c.flow_temp_entity, 'Flow temperature')}><span class="sw" style="background:#FF8A3D"></span>Flow <b>${deg(flowNow)}</b>${c.flow_target_entity ? ` → ${deg(tgtNow)}` : ''}</button>
     <button class="tap chip num" ${this._tapAttrs(c.return_temp_entity, 'Return temperature')}><span class="sw" style="background:#4C8DF0"></span>Return <b>${deg(retNow)}</b></button>
     <span class="chip num">ΔT <b>${flowNow != null && retNow != null ? deg(flowNow - retNow) : '--'}</b></span>
     ${c.flow_target_entity ? '<span class="chip"><span class="sw-dash"></span>Target</span>' : ''}
@@ -820,8 +901,7 @@ ha-card { padding: 20px 22px 18px; }
     ${lanes}
     <div class="hrow"><span></span><div class="xaxis num">${ticks}</div></div>
   </div>
-</div>
-</ha-card>`;
+</div>`;
   }
 }
 
@@ -886,13 +966,13 @@ ha-card { padding: 12px; }
       const t = this._temp(id);
       return `<button class="tap tile" ${this._tapAttrs(id, name)}>
         <span class="lbl">${icon(ic, 18)}<span>${esc(name)}</span></span>
-        <span class="val num">${t.v == null ? '--' : t.v.toFixed(1)}<small>${esc(t.unit)}</small></span>
+        <span class="val num">${fmtNum(t.v, 1)}<small>${esc(t.unit)}</small></span>
       </button>`;
     };
-    return `<ha-card><div class="cc">
+    return `<div class="cc">
       ${tile(c.outdoor_entity, c.outdoor_name || 'Outdoor', 'outdoor')}
       ${tile(c.indoor_entity, c.indoor_name || 'Indoor', 'indoor')}
-    </div></ha-card>`;
+    </div>`;
   }
 }
 
@@ -1004,16 +1084,16 @@ ha-card { padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; 
     const dhw = this._kwh(c.hot_water_entity);
     const total = (heat || 0) + (dhw || 0);
     const pct = (v) => (total > 0 && v != null ? Math.round((v / total) * 100) : null);
-    const fmt = (v) => (v == null ? '--' : v.toFixed(1));
+    const fmt = (v) => fmtNum(v, 1);
     const row = (id, name, v, color) => `
       <button class="tap row num" ${this._tapAttrs(id, name)}>
         <span class="dot" style="color:${color}"></span><span class="name">${name}</span>
         <span class="v">${fmt(v)} kWh</span><span class="pct">${pct(v) == null ? '' : pct(v) + '%'}</span>
       </button>`;
-    return `<ha-card>
+    return `
       <div class="top">
         <span class="lbl">${icon('bolt', 18)}<span>${esc(c.title ?? 'Energy today')}</span></span>
-        <span class="total num">${heat == null && dhw == null ? '--' : total.toFixed(1)} <small>kWh</small></span>
+        <span class="total num">${heat == null && dhw == null ? '--' : fmtNum(total, 1)} <small>kWh</small></span>
       </div>
       <div class="bar">
         ${total > 0 ? `<div style="width:${((heat || 0) / total) * 100}%;background:#FF8A3D"></div><div style="flex-grow:1;background:#C084FC"></div>` : ''}
@@ -1021,8 +1101,7 @@ ha-card { padding: 20px 22px; display: flex; flex-direction: column; gap: 14px; 
       <div class="list">
         ${row(c.heating_entity, 'Heating', heat, '#FF8A3D')}
         ${row(c.hot_water_entity, 'Hot water', dhw, '#C084FC')}
-      </div>
-    </ha-card>`;
+      </div>`;
   }
 }
 

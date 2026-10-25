@@ -29,7 +29,8 @@
 </div>
 
 <script type="module">
-import '../dist/boiler-cards.js';
+// Cache-busted so edits to the card show up on a normal reload.
+await import(`../dist/boiler-cards.js?t=${Date.now()}`);
 
 const NOW = Date.now();
 const iso = (t) => new Date(t).toISOString();
